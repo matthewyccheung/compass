@@ -1,137 +1,212 @@
 # COMPASS 2D (Segmentation → Scalar CP)
 
-The 2D pipeline in this repository evaluates conformal prediction (CP) methods for **scalar targets derived from 2D segmentation masks**.
+This folder contains the **2D** pipeline for COMPASS-style conformal prediction (CP) methods for **scalar targets derived from 2D segmentation masks**.
 
-This repo currently ships with a single scalar target:
+This release ships with a single scalar target:
 
 - `mask_sum`: sum of mask pixels (area proxy)
 
-2D entrypoints live under `2D/` (e.g. `2D/run_cp.py`), and the reusable implementation lives under `compass2d/`.
+2D entrypoints live under `2D/`, and the reusable implementation lives under `compass2d/`.
 
-## Run 2D experiments (requires dataset + trained models)
+## What’s included in this release (2D)
 
-### 1) Prepare a dataset folder
+- `2D/run_cp_L.py`: **logits-only** runner (recommended; no Jacobians, much cheaper)
+- `2D/run_cp.py`: full runner (includes Jacobian-based COMPASS-J methods)
+- `2D/run_jactime.py`: Jacobian timing utility
+- `2D/datasets/<dataset>/`: dataset-specific preprocessing + training helpers
+- `compass2d/`: reusable 2D code (loaders, caching, methods)
+- `compass_paths.py`: results directory helper (writes under `COMPASS_RESULTS_DIR`)
 
-Supported built-in dataset keys:
+Note: this release intentionally does **not** include figure-generation / plotting scripts.
 
-- `ebhi`
-- `ham10k`
-- `kvasir`
-- `tn3k`
+## Install
 
-Dataset-specific preprocessing/training helpers (used to create the expected on-disk layout and checkpoints) live under `2D/datasets/<dataset>/`.
+1) Create a Python environment.
+2) Install requirements:
 
-Most loaders in `compass2d/dataloaders.py` assume you have **images** and **labels** split into:
+```bash
+pip install -r requirements-2d.txt
+```
+
+Notes:
+- Install **PyTorch** according to your CUDA setup.
+- Most runs assume a GPU.
+
+## Results location
+
+All experiment outputs are written under:
+
+- `COMPASS_RESULTS_DIR` (default: `/scratch/yc130/compass_results`)
+
+Set it explicitly if desired:
+
+```bash
+export COMPASS_RESULTS_DIR=/scratch/yc130/compass_results
+```
+
+## Dataset layout (required)
+
+The 2D runners expect each dataset to be laid out as:
 
 - `imagesTr/`, `labelsTr/` (train)
 - `imagesVa/`, `labelsVa/` (calibration/validation)
 - `imagesTs/`, `labelsTs/` (test)
 
-The default scripts are written for the original author’s filesystem and may set `root_dir` to paths under `/scratch/...`.
-When running locally, update the `root_dir` selection logic in `2D/run_cp.py` (and related scripts) to point to your dataset location.
-In the cleaned repo layout, these scripts are under `2D/` (e.g. `2D/run_cp.py`).
-
-### 2) Provide trained model weights
-
-The experiment scripts expect a dataset root that contains:
+and to include trained checkpoints at:
 
 - `models/<MODEL_NAME>/best_model.pth` (baseline segmentation model)
-- `models/<QR_MODEL_NAME>/best_model.pth` (3-head “QR” model with `out_channels=3`)
+- `models/<QR_MODEL_NAME>/best_model.pth` (3-head “QR/CQR” segmentation model, `out_channels=3`)
 
-Model names are currently selected from dictionaries in `2D/run_cp.py`:
+Default dataset roots in the runners are hardcoded under `/scratch/...` (author environment). Update `DATASET_ROOTS` in:
+
+- `2D/run_cp.py`
+- `2D/run_cp_L.py`
+
+## Preprocessing / splitting datasets
+
+The scripts under `2D/datasets/<dataset>/` include lightweight preprocessing helpers (e.g. `split_dataset.py`).
+
+They are **dataset-specific** and usually assume a particular on-disk raw layout and a `/scratch/...` path.
+Before running them, open the script and edit `base_path` / `root_dir` / raw folder names as needed.
+
+Example:
+
+```bash
+python 2D/datasets/kvasir/split_dataset.py
+```
+
+## Training models (baseline “NN” + 3-head “CQR/QR”)
+
+The CP runners require two trained segmentation models per (dataset, architecture):
+
+1) A standard single-head segmentation model (`out_channels=1`).
+2) A 3-head quantile segmentation model (`out_channels=3`) used by the `E2E-CQR` baseline.
+
+### Train baseline segmentation model (“NN”)
+
+Run the dataset-specific script:
+
+```bash
+python 2D/datasets/<dataset>/run_nn.py
+```
+
+You typically need to edit at least:
+
+- `data_dir` / `root_dir` (dataset location)
+- `device`
+- `arch` (`UNet` or `SegResNet`)
+
+The script saves checkpoints under:
+
+- `<DATASET_ROOT>/models/<ARCH>_<TIMESTAMP>/best_model.pth`
+
+### Train 3-head quantile model (“CQR/QR model”)
+
+Run:
+
+```bash
+python 2D/datasets/<dataset>/run_qrnn.py
+```
+
+You typically need to edit:
+
+- `data_dir` / `root_dir`
+- `device`
+- `arch` (`QRUNet` or `QRSegResNet`)
+
+The script saves:
+
+- `<DATASET_ROOT>/models/<QRARCH>_<TIMESTAMP>/best_model.pth`
+
+### Point the CP runners to your trained checkpoints
+
+The runners select checkpoints via dictionaries inside the scripts:
 
 - `model_names[dataset][arch]`
 - `qr_model_names[dataset][arch]`
 
-If you add your own models, update these mappings (or add a new dataset entry).
+After training, update those entries to match the directory names you produced (e.g. `UNet_20260101_120000`).
 
-### 3) Extract cached variables (optional but typical)
+## Run COMPASS 2D
 
-`2D/run_cp.py` can cache intermediate variables (latents, predictions, jacobians, scalar targets) into:
+### Recommended: logits-only (`COMPASS-L` / `A-COMPASS-L`)
 
-`<DATASET_ROOT>/data/<MODEL_NAME>/<METRIC>/`
+Edit `config = {...}` near the top of `2D/run_cp_L.py`:
 
-Set in `2D/run_cp.py`:
+- `dataset`, `arch`, `alpha`, `device`
+- set `generate_vars=True` for the first run (to cache variables)
 
-- `config['generate_vars'] = True` (first time)
+Run:
 
-### 4) Run evaluations and write raw interval outputs
+```bash
+python 2D/run_cp_L.py
+```
 
-`2D/run_cp.py` evaluates multiple CP methods and (when enabled) writes per-test-point raw outputs under `COMPASS_RESULTS_DIR/2D/`:
+This runner:
+
+- caches **no Jacobians**
+- evaluates baselines (`SCP`, `CQR`, `Local`, `E2E-CQR`) and logits methods (`COMPASS-L`, `A-COMPASS-L`)
+
+### Full run (includes Jacobians + COMPASS-J)
+
+If you want Jacobian-based methods, use:
+
+```bash
+python 2D/run_cp.py
+```
+
+## Outputs (what gets saved)
+
+Raw per-test-point intervals are saved as pickles under:
 
 - `COMPASS_RESULTS_DIR/2D/raw_<alpha>/raw_<dataset>_<method>_<rep>.pkl`
 
-These `.pkl` files store arrays of `(hi, lo, gt)` and can be summarized by:
+Each pickle is typically `[arr, runtime_s]` where `arr` is shaped `(3, N)` as `(hi, lo, gt)`.
 
-```bash
-python scripts/figures/summarize_2d_raw_results.py --results_root "$COMPASS_RESULTS_DIR/2D" --out_csv "$COMPASS_RESULTS_DIR/2D/summary_2d.csv"
+This release does **not** ship summarization/plotting scripts; you can load a file with:
+
+```python
+import pickle
+
+arr, runtime_s = pickle.load(open(path, "rb"))
+hi, lo, gt = arr
 ```
-
-## Common configuration knobs
-
-In `2D/run_cp.py`, key settings are in the `config = {...}` dictionary near the top:
-
-- `dataset`: dataset key used in loader/model mappings
-- `arch`: `UNet` or `SegResNet`
-- `metric`: scalar target (default: `mask_sum`)
-- `alpha`: miscoverage rate
-- `device` / `device2`: GPU devices for baseline vs QR model
 
 ## Jacobian computation warnings (read this first)
 
-Some methods in this repo use **Jacobian-based features** (saved under `J/` in extracted variables) and require computing gradients via autograd.
+Some methods use Jacobian-based features (saved under `J/` in cached variables) and require autograd.
 
 Practical limitations:
 
-- **GPU memory / runtime:** Jacobian extraction performs backprop through the model per sample and can be **~2–3× slower** than logits-only in typical runs. Memory spikes are common; expect to run with small batch sizes (often `1`) and/or reduced resolution.
-- **Model dependence:** Jacobians are properties of a *specific trained checkpoint*. If you change the architecture, training seed, data preprocessing, or checkpoint, Jacobians (and interval behavior) can change materially. Comparisons should be made **within the same trained model family**.
-- **Approximation details:** Jacobians are taken with respect to a *differentiable scalar target* (e.g., `post_trans_mask_sum_diff` uses a temperature-scaled sigmoid). Different “soft” approximations can change gradients.
+- **GPU memory / runtime:** Jacobian extraction performs backprop per sample and can be much slower than logits-only. OOM is common unless you use batch size 1 and/or reduced resolution.
+- **Model dependence:** Jacobians are checkpoint-dependent. Changing seeds/training/preprocessing/checkpoints can materially change Jacobians and downstream CP behavior.
 
 Recommendation:
 
-- Start with **logits-based** methods first (they are substantially cheaper and often competitive). The script `2D/run_cp_boostlogits.py` is a logits-only evaluation path that avoids Jacobian extraction (`jacobians=False` during variable caching).
-- In practice, logits-only runs often provide **most of the efficiency gains** versus baselines and can be competitive with Jacobian-based methods. Always validate on your dataset/checkpoint.
+- Start with **logits-only** (`2D/run_cp_L.py`) first.
 
 ## Limitations and failure modes (important)
 
-Current COMPASS formulations (2D and 3D) are **model-dependent**: performance is tightly coupled to the underlying segmentation model’s calibration and confidence structure.
+Current COMPASS formulations are **model-dependent**: performance is tightly coupled to the segmentation model’s calibration and confidence structure.
 
 Common ways performance can deteriorate:
 
-- **Overconfident models:** If the segmentation model is systematically overconfident (e.g., very sharp logits but wrong), COMPASS-style perturbations can produce intervals that are too tight and under-cover. In these cases, **SCP can be much better** (more robust coverage at the cost of larger intervals).
-- **Checkpoint sensitivity:** Results can vary materially across architectures, seeds, training recipes, or checkpoints even on the same dataset.
-- **Scalarization loss:** Using a scalar proxy like `mask_sum` discards shape information; two masks with the same area can have very different segmentation quality.
-- **Hyperparameter/search fragility:** Beta search thresholds/ranges can affect both runtime and the final interval, especially when logits saturate or when the target is insensitive to perturbations.
-- **Finite-sample calibration:** With limited calibration data, all methods can exhibit high variance; interval length/coverage estimates can be noisy.
+- **Overconfident models:** intervals can become too tight and under-cover; in such cases, **SCP can be much better**.
+- **Checkpoint sensitivity:** results vary across architectures, seeds, recipes, checkpoints.
+- **Scalarization loss:** scalar proxies (like `mask_sum`) discard shape information.
 
-Addressing these limitations (e.g., better calibration, robustness to overconfidence, and more stable search/targets) is left for **future work**.
+Methods to overcome these limitations are left for **future work**.
 
 ## Adding a new architecture
 
-To add a new 2D architecture (example: `MyNet`):
-
-1) Add it to `2D/run_cp.py`:
-   - import the class
-   - add it to `model_architectures`
-   - add per-dataset entries in `model_configs` and `qr_model_configs`
-   - add checkpoint names to `model_names` and `qr_model_names` (or refactor to your own naming)
-2) Add Jacobian support in `compass2d/model_fns.py`:
-   - update `get_fns(arch, post_trans_diff)` to return `forward_x`, `forward_latent`, and `compute_jacobian` for your architecture.
+1) Add it to `2D/run_cp.py` and `2D/run_cp_L.py` (import, configs, checkpoint names).
+2) Add forward hooks in `compass2d/model_fns.py` via `get_fns(arch, post_trans_diff)`.
 
 ## Adding a new metric (scalar target)
 
-This repo currently ships with a single scalar target:
+1) Implement `post_trans_<metric>` and `post_trans_<metric>_diff` in `compass2d/model_fns.py`.
+2) Register it in `get_post_transforms` in the runner scripts.
 
-- `mask_sum`: sum of mask pixels (area proxy)
-
-To add a new metric:
-
-1) Implement two functions in `compass2d/model_fns.py`:
-   - `post_trans_<metric>(logits_or_mask, channel, ...)` (discrete version)
-   - `post_trans_<metric>_diff(logits, channel, ...)` (differentiable version for Jacobians)
-2) Register it in `2D/run_cp.py:get_post_transforms`.
-3) If you use QR caching, ensure `compass2d/data_utils.py:QRDataExtractionWrapperSave` computes the correct target for your metric.
-
-## Next: adding datasets
+## Adding datasets
 
 Follow `docs/adding_datasets_2d.md`.
